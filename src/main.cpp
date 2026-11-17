@@ -16,71 +16,74 @@
 //SET：設置按鍵
 //RST：復位按鍵
 
-// 引入 Arduino 核心標頭檔，提供 pinMode、digitalRead、Serial 等核心函式與常數定義
+// 引入 Arduino 核心標頭檔
 #include <Arduino.h>
 
-// 定義一個結構體（struct）NavKey，用來封裝單一按鍵的相關設定與狀態
+// 定義結構體 NavKey，封裝按鍵名稱、腳位與前次狀態
 struct NavKey {
-    const char* name;    // 按鍵名稱字串（例如 "UP"、"DOWN"），供序列埠輸出顯示
-    uint8_t pin;         // 按鍵連接在 Arduino 上的數位腳位編號（例如 2 代表 D2 腳位）
-    bool lastState;      // 記錄按鍵上一次的讀取狀態（HIGH 或 LOW），用於負緣觸發判定
+    const char* name;    // 按鍵名稱字串（例如 "UP"、"DOWN"）
+    uint8_t pin;         // 連接在 Arduino 上的數位腳位編號
+    bool lastState;      // 記錄前一次電位狀態（HIGH 未按，LOW 按下）
 };
 
-// 宣告並初始化按鍵結構體陣列，將 7 個按鍵的名稱、接腳及初始狀態集中管理
+// 初始化按鍵陣列，定義 7 顆按鍵的名稱、接腳及初始狀態
 NavKey keys[] = {
-    {"UP",    2, HIGH},  // 0: UP 上方向鍵，接在 D2 腳位，初始狀態設為 HIGH（未按下）
-    {"DOWN",  3, HIGH},  // 1: DOWN 下方向鍵，接在 D3 腳位，初始狀態設為 HIGH（未按下）
-    {"LEFT",  4, HIGH},  // 2: LEFT 左方向鍵，接在 D4 腳位，初始狀態設為 HIGH（未按下）
-    {"RIGHT", 5, HIGH},  // 3: RIGHT 右方向鍵，接在 D5 腳位，初始狀態設為 HIGH（未按下）
-    {"MID",   6, HIGH},  // 4: MID 中間確認鍵，接在 D6 腳位，初始狀態設為 HIGH（未按下）
-    {"SET",   7, HIGH},  // 5: SET 設定功能鍵，接在 D7 腳位，初始狀態設為 HIGH（未按下）
-    {"RST",   8, HIGH}   // 6: RST 復位功能鍵，接在 D8 腳位，初始狀態設為 HIGH（未按下）
+    {"UP",    2, HIGH},  // 0: UP 上方向鍵（D2）
+    {"DOWN",  3, HIGH},  // 1: DOWN 下方向鍵（D3）
+    {"LEFT",  4, HIGH},  // 2: LEFT 左方向鍵（D4）
+    {"RIGHT", 5, HIGH},  // 3: RIGHT 右方向鍵（D5）
+    {"MID",   6, HIGH},  // 4: MID 中間確認鍵（D6）
+    {"SET",   7, HIGH},  // 5: SET 設定功能鍵（D7）
+    {"RST",   8, HIGH}   // 6: RST 復位功能鍵（D8）
 };
 
-// 計算按鍵陣列中的元素總數（利用陣列總位元組大小除以單一元素大小，計算出共有 7 顆按鍵）
+// 計算按鍵總數量
 const int KEY_COUNT = sizeof(keys) / sizeof(keys[0]);
 
-// Arduino 開機或重置後首先執行的初始化函式（僅執行一次）
+// 初始化設定函式
 void setup() {
-    // 啟動序列埠通訊，並設定鮑率（Baud Rate）為 115200 bps
+    // 啟動序列埠通訊，鮑率設為 115200 bps
     Serial.begin(115200);
 
-    // 等待序列埠通訊就緒（主要針對原生 USB 晶片板子；Uno 板會直接通過）
+    // 等待序列埠通訊就緒
     while (!Serial) { delay(10); }
 
-    // 使用 for 迴圈依序巡訪陣列中的每一個按鍵
+    // 迴圈將所有按鍵腳位設為內建上拉模式（INPUT_PULLUP）
     for (int i = 0; i < KEY_COUNT; i++) {
-        // 將該腳位設定為 INPUT_PULLUP 模式（啟用晶片內建上拉電阻，未按為 HIGH，按下接 GND 為 LOW）
         pinMode(keys[i].pin, INPUT_PULLUP);
     }
 
-    // 在序列埠監視器印出開機初始化完成訊息，並自動換行
-    Serial.println("=== 5-Way Navigation Key Initialized ===");
+    // 發送初始化完成訊息
+    Serial.println("=== 5-Way Continuous Navigation Ready ===");
 }
 
-// 主循環函式，在 setup() 完成後會以無窮迴圈方式持續重複執行
+// 主循環掃描函式
 void loop() {
-    // 迴圈依序檢查 7 顆按鍵的即時觸發狀態
+    // 循序檢查每一個按鍵的電位狀態
     for (int i = 0; i < KEY_COUNT; i++) {
-        // 讀取第 i 個按鍵腳位的當前電位狀態（HIGH 代表未按下，LOW 代表按下接通）
+        // 讀取當前腳位電位（HIGH 代表未按，LOW 代表按下）
         bool currentState = digitalRead(keys[i].pin);
 
-        // 判斷是否為「剛好被按下的瞬間」（前一次為 HIGH 且當前為 LOW，即下降緣觸發）
+        // 偵測「按下」瞬間（由 HIGH 變為 LOW）
         if (keys[i].lastState == HIGH && currentState == LOW) {
-            // 延遲 15 毫秒進行硬體防彈跳（Debounce），避開微動開關機械接點彈跳產生的瞬間雜訊
-            delay(15);
-
-            // 防彈跳延遲後再次確認腳位電位，若仍維持在 LOW，代表這是一次真實有效的按鍵按下
+            delay(10); // 防彈跳延遲
             if (digitalRead(keys[i].pin) == LOW) {
-                // 在序列埠印出提示前綴文字 "Pressed: "（不自動換行）
-                Serial.print("Pressed: ");
-
-                // 印出當前觸發的按鍵名稱，並自動換行（例如印出 "UP"）
+                // 發送按下訊號，例如 "PRESS:UP"
+                Serial.print("PRESS:");
+                Serial.println(keys[i].name);
+            }
+        }
+        // 偵測「放開」瞬間（由 LOW 變為 HIGH）
+        else if (keys[i].lastState == LOW && currentState == HIGH) {
+            delay(10); // 防彈跳延遲
+            if (digitalRead(keys[i].pin) == HIGH) {
+                // 發送放開訊號，例如 "RELEASE:UP"
+                Serial.print("RELEASE:");
                 Serial.println(keys[i].name);
             }
         }
 
-        // 更新歷史狀態，將本次讀取的電位存入 lastState，以供下一個迴圈比對
+        // 更新最後狀態
         keys[i].lastState = currentState;
     }
 }
