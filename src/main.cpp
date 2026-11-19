@@ -14,6 +14,10 @@
 const char* SSID     = "mcugust";   // Wi-Fi 名稱（SSID）
 const char* PASSWORD = "mcu18226";  // Wi-Fi 密碼
 
+// ── AP 備援模式設定（Wi-Fi 連不上時，ESP32 自己開熱點）─────
+const char* AP_SSID  = "ESP32-DHT11";  // ESP32 熱點名稱
+const char* AP_PASS  = "12345678";     // ESP32 熱點密碼（至少8碼）
+
 // ── DHT11 感測器設定 ────────────────────────────────────────
 #define DHT_PIN  15        // DHT11 資料腳位：GPIO 15
 #define DHT_TYPE DHT11     // 感測器型號：DHT11
@@ -42,7 +46,7 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
       font-family: 'Segoe UI', Arial, sans-serif;
-      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, rgb(15, 52, 96) 100%);
       min-height: 100vh;
       display: flex;
       flex-direction: column;
@@ -198,7 +202,9 @@ void setup() {
   Serial.println("[DHT] DHT11 初始化完成，接腳：GPIO 15");
 
   // ── 連接 Wi-Fi ───────────────────────────────────────────
-  Serial.printf("[WiFi] 連接至：%s\n", SSID);
+  Serial.printf("[WiFi] 嘗試連接：%s\n", SSID);
+  Serial.println("[WiFi] 注意：ESP32 只支援 2.4GHz，不支援 5GHz！");
+  WiFi.mode(WIFI_STA);               // 設定為 Station 模式（連接路由器）
   WiFi.begin(SSID, PASSWORD);        // 開始連接 Wi-Fi
 
   int retries = 0;                   // 重試計數
@@ -206,14 +212,27 @@ void setup() {
     delay(500);                      // 每 500ms 檢查一次
     Serial.print(".");
     retries++;
-    if (retries > 30) {              // 超過 15 秒仍未連線則重啟
-      Serial.println("\n[WiFi] 連線逾時，重新啟動...");
-      ESP.restart();                 // 重啟 ESP32
+    if (retries > 20) {              // 超過 10 秒仍未連線 → 切換 AP 模式
+      Serial.println("\n[WiFi] 連線失敗！切換為 AP 熱點模式...");
+      WiFi.mode(WIFI_AP);            // 切換為 AP（Access Point）模式
+      WiFi.softAP(AP_SSID, AP_PASS); // 建立 ESP32 熱點
+      Serial.println("=========================================");
+      Serial.printf("[AP] 熱點名稱：%s\n", AP_SSID);
+      Serial.printf("[AP] 熱點密碼：%s\n", AP_PASS);
+      Serial.printf("[AP] 連上熱點後，開啟瀏覽器輸入：http://192.168.4.1\n");
+      Serial.println("=========================================");
+      break;                         // 跳出等待迴圈
     }
   }
-  Serial.println();
-  Serial.printf("[WiFi] 連線成功！IP 位址：http://%s\n",
-    WiFi.localIP().toString().c_str()); // 印出 IP，用瀏覽器開啟此網址
+
+  if (WiFi.status() == WL_CONNECTED) { // STA 模式連線成功
+    Serial.println();
+    Serial.println("=========================================");
+    Serial.printf("[WiFi] 連線成功！\n");
+    Serial.printf("[WiFi] 請用瀏覽器開啟：http://%s\n",
+      WiFi.localIP().toString().c_str());
+    Serial.println("=========================================");
+  }
 
   // ── 設定 Web Server 路由 ─────────────────────────────────
   server.on("/",      handleRoot);    // 根路由 → Dashboard HTML
