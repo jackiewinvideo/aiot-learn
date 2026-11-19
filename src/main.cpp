@@ -211,7 +211,7 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
         ctx.shadowColor=color; ctx.shadowBlur=6;
         ctx.beginPath();
         arr.forEach((v,i)=>{
-          const x = P.l + (i/(MAX_PTS-1))*cW;
+          const x = P.l + (i/(MAX_PTS-1))*cW*0.9;  // 右邊保留 10% 空間
           const y = P.t + cH - (Math.min(Math.max(v,0),maxV)/maxV)*cH;
           i===0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y);
         });
@@ -219,7 +219,7 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
         ctx.shadowBlur=0;
         // 最新值的圓點與數值標籤
         const li=arr.length-1;
-        const lx=P.l+(li/(MAX_PTS-1))*cW;
+        const lx=P.l+(li/(MAX_PTS-1))*cW*0.9;  // 右邊保留 10% 空間
         const ly=P.t+cH-(Math.min(Math.max(arr[li],0),maxV)/maxV)*cH;
         ctx.fillStyle=color;
         ctx.beginPath(); ctx.arc(lx,ly,4,0,Math.PI*2); ctx.fill();
@@ -232,9 +232,9 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
 
       // X 軸時間標籤（首、中、末）
       ctx.fillStyle='#636e72'; ctx.font='10px Arial'; ctx.textAlign='center';
-      ctx.fillText(lArr[0],               P.l,                    H-4);
-      ctx.fillText(lArr[Math.floor(n/2)], P.l+(Math.floor(n/2)/(MAX_PTS-1))*cW, H-4);
-      ctx.fillText(lArr[n-1],             P.l+((n-1)/(MAX_PTS-1))*cW,           H-4);
+      ctx.fillText(lArr[0],               P.l,                              H-4);
+      ctx.fillText(lArr[Math.floor(n/2)], P.l+(Math.floor(n/2)/(MAX_PTS-1))*cW*0.9, H-4);
+      ctx.fillText(lArr[n-1],             P.l+((n-1)/(MAX_PTS-1))*cW*0.9,           H-4);
     }
 
     function update() {
