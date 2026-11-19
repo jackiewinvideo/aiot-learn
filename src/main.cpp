@@ -146,25 +146,119 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
     每 3 秒自動更新 ・ 上次更新：<span id="ts">--</span>
   </div>
 
+  <style>
+    .chart-wrap {
+      margin-top: 36px;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 16px;
+      padding: 20px 20px 12px;
+      width: 90%;
+      max-width: 680px;
+    }
+    .chart-title { font-size:0.9rem; color:#b2bec3; letter-spacing:1px; margin-bottom:8px; }
+    .chart-legend { font-size:0.78rem; margin-bottom:10px; }
+    .leg-t { color:#ff6b6b; margin-right:16px; }
+    .leg-h { color:#48dbfb; }
+    #chart { width:100%; display:block; }
+  </style>
+
+  <div class="chart-wrap">
+    <div class="chart-title">📈 歷史趨勢（最近 30 筆，每 3 秒更新）</div>
+    <div class="chart-legend">
+      <span class="leg-t">▬ 溫度 (°C)｜左軸 0–50</span>
+      <span class="leg-h">▬ 濕度 (%)｜右軸 0–100</span>
+    </div>
+    <canvas id="chart" width="640" height="180"></canvas>
+  </div>
+
   <script>
-    // 每 3 秒向 /data 請求最新數值並更新畫面
+    const MAX_PTS = 30;
+    let tArr=[], hArr=[], lArr=[];
+
+    function drawChart() {
+      const cv = document.getElementById('chart');
+      const ctx = cv.getContext('2d');
+      const W=cv.width, H=cv.height;
+      const P={t:18,r:48,b:28,l:42};
+      const cW=W-P.l-P.r, cH=H-P.t-P.b;
+
+      ctx.clearRect(0,0,W,H);
+
+      // 圖表背景
+      ctx.fillStyle='rgba(255,255,255,0.03)';
+      ctx.fillRect(P.l,P.t,cW,cH);
+
+      // 格線 + 左右 Y 軸刻度
+      for(let i=0;i<=5;i++){
+        const y=P.t+(cH/5)*i;
+        ctx.strokeStyle='rgba(255,255,255,0.08)';
+        ctx.lineWidth=1;
+        ctx.beginPath(); ctx.moveTo(P.l,y); ctx.lineTo(P.l+cW,y); ctx.stroke();
+        ctx.font='10px Arial';
+        ctx.fillStyle='#ff9f9f'; ctx.textAlign='right';
+        ctx.fillText((50-i*10)+'°', P.l-4, y+4);       // 溫度軸（左）
+        ctx.fillStyle='#7fe8ff'; ctx.textAlign='left';
+        ctx.fillText((100-i*20)+'%', P.l+cW+4, y+4);   // 濕度軸（右）
+      }
+
+      if(tArr.length < 2) return;
+      const n = tArr.length;
+
+      // 畫折線函式
+      function line(arr, maxV, color){
+        ctx.strokeStyle=color; ctx.lineWidth=2;
+        ctx.shadowColor=color; ctx.shadowBlur=6;
+        ctx.beginPath();
+        arr.forEach((v,i)=>{
+          const x = P.l + (i/(MAX_PTS-1))*cW;
+          const y = P.t + cH - (Math.min(Math.max(v,0),maxV)/maxV)*cH;
+          i===0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y);
+        });
+        ctx.stroke();
+        ctx.shadowBlur=0;
+        // 最新值的圓點與數值標籤
+        const li=arr.length-1;
+        const lx=P.l+(li/(MAX_PTS-1))*cW;
+        const ly=P.t+cH-(Math.min(Math.max(arr[li],0),maxV)/maxV)*cH;
+        ctx.fillStyle=color;
+        ctx.beginPath(); ctx.arc(lx,ly,4,0,Math.PI*2); ctx.fill();
+        ctx.font='bold 11px Arial'; ctx.textAlign='center';
+        ctx.fillText(arr[li].toFixed(1), lx, ly-10);
+      }
+
+      line(tArr, 50,  '#ff6b6b');   // 溫度（最大 50°C）
+      line(hArr, 100, '#48dbfb');   // 濕度（最大 100%）
+
+      // X 軸時間標籤（首、中、末）
+      ctx.fillStyle='#636e72'; ctx.font='10px Arial'; ctx.textAlign='center';
+      ctx.fillText(lArr[0],               P.l,                    H-4);
+      ctx.fillText(lArr[Math.floor(n/2)], P.l+(Math.floor(n/2)/(MAX_PTS-1))*cW, H-4);
+      ctx.fillText(lArr[n-1],             P.l+((n-1)/(MAX_PTS-1))*cW,           H-4);
+    }
+
     function update() {
       fetch('/data')
         .then(r => r.json())
         .then(d => {
-          document.getElementById('temp').textContent =
-            isNaN(d.temperature) ? '--' : d.temperature.toFixed(1);
-          document.getElementById('humi').textContent =
-            isNaN(d.humidity) ? '--' : d.humidity.toFixed(1);
-          document.getElementById('ts').textContent = new Date().toLocaleTimeString();
+          const t=parseFloat(d.temperature), h=parseFloat(d.humidity);
+          document.getElementById('temp').textContent = isNaN(t)?'--':t.toFixed(1);
+          document.getElementById('humi').textContent = isNaN(h)?'--':h.toFixed(1);
+          const ts = new Date().toLocaleTimeString();
+          document.getElementById('ts').textContent = ts;
+          if(!isNaN(t) && !isNaN(h)){
+            if(tArr.length>=MAX_PTS){ tArr.shift(); hArr.shift(); lArr.shift(); }
+            tArr.push(t); hArr.push(h); lArr.push(ts);
+            drawChart();
+          }
         })
-        .catch(() => {
-          document.getElementById('temp').textContent = '--';
-          document.getElementById('humi').textContent = '--';
+        .catch(()=>{
+          document.getElementById('temp').textContent='--';
+          document.getElementById('humi').textContent='--';
         });
     }
-    update();                       // 頁面載入時立即取一次
-    setInterval(update, 3000);      // 之後每 3000ms（3 秒）自動取一次
+    update();
+    setInterval(update, 3000);
   </script>
 </body>
 </html>
