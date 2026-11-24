@@ -1,362 +1,549 @@
-// ============================================================
-// ESP32-S3 DHT11 溫濕度 Web Dashboard
-// 感測器：DHT-11 接 GPIO 15
-// 功能：連上 Wi-Fi，開啟 Web Server，提供即時溫濕度 Dashboard
-// 瀏覽器開啟 http://<ESP32的IP> 即可查看
-// ============================================================
+/**
+ * @file main.cpp
+ * @brief ESP32 CYD (ESP32-2432S028R) 4 顆飛行隨機 RGB 球物理碰撞反彈系統
+ * 
+ * 核心特性：
+ * 1. 2D 完全彈性碰撞物理引擎 (Elastic Collision Physics)：
+ *    - 動量守恆與動能守恆 (Conservation of Momentum & Kinetic Energy)
+ *    - 法線衝量計算 (Normal Impulse Resolution)
+ *    - 位置分離校正 (Positional Penetration Resolution，徹底根除嵌合/卡球 Bug)
+ *    - 牆面精確反彈邊界檢測
+ * 2. 60 FPS 極致流暢無閃爍渲染 (Flicker-Free Rendering)：
+ *    - 上一幀位置局部微抹除 (Local Dirty Erase)，擺脫全螢幕清屏閃爍
+ * 3. 3D 擬真立體光影球體：
+ *    - 徑向漸層與鏡面高光 (Specular Highlight)
+ *    - 碰撞瞬間產生衝擊光暈波紋 (Shockwave Ripple)
+ * 4. 觸控互動手勢：
+ *    - 點選球體：拖曳並於釋放時依甩動手勢賦予速度向量 (Flick / Throw)
+ *    - 點擊空白處：產生引力/排斥力場 (Force Push / Shockwave)
+ * 5. CYD 硬體整合：
+ *    - 板載 RGB LED (Active LOW) 在球體碰撞時同步閃爍發光反饋
+ */
 
-#include <Arduino.h>       // Arduino 核心標頭
-#include <WiFi.h>          // ESP32 Wi-Fi 庫
-#include <WebServer.h>     // ESP32 內建 HTTP Web Server 庫
-#include <DHT.h>           // Adafruit DHT 感測器庫
+#include <Arduino.h>
+#include <TFT_eSPI.h>
+#include <XPT2046_Touchscreen.h>
+#include <SPI.h>
 
-// ── Wi-Fi 設定 ─────────────────────────────────────────────
-const char* SSID     = "mcugust";   // Wi-Fi 名稱（SSID）
-const char* PASSWORD = "mcu18226";  // Wi-Fi 密碼
+// ==========================================
+// 1. 硬體針腳與周邊配置 (CYD ESP32-2432S028R)
+// ==========================================
+TFT_eSPI tft = TFT_eSPI();
 
-// ── AP 備援模式設定（Wi-Fi 連不上時，ESP32 自己開熱點）─────
-const char* AP_SSID  = "ESP32-DHT11";  // ESP32 熱點名稱
-const char* AP_PASS  = "12345678";     // ESP32 熱點密碼（至少8碼）
+// CYD 專屬 XPT2046 觸控 SPI 腳位
+SPIClass touchSPI = SPIClass(VSPI);
+#ifndef XPT2046_CS
+#define XPT2046_CS 33
+#endif
+#ifndef XPT2046_IRQ
+#define XPT2046_IRQ 36
+#endif
+#ifndef XPT2046_CLK
+#define XPT2046_CLK 25
+#endif
+#ifndef XPT2046_MISO
+#define XPT2046_MISO 39
+#endif
+#ifndef XPT2046_MOSI
+#define XPT2046_MOSI 32
+#endif
 
-// ── DHT11 感測器設定 ────────────────────────────────────────
-#define DHT_PIN  15        // DHT11 資料腳位：GPIO 15
-#define DHT_TYPE DHT11     // 感測器型號：DHT11
+XPT2046_Touchscreen ts(XPT2046_CS, XPT2046_IRQ);
 
-DHT dht(DHT_PIN, DHT_TYPE); // 建立 DHT 物件
+// 板載 RGB LED (Active LOW 低電位點亮)
+#ifndef CYD_LED_RED
+#define CYD_LED_RED 4
+#endif
+#ifndef CYD_LED_GREEN
+#define CYD_LED_GREEN 16
+#endif
+#ifndef CYD_LED_BLUE
+#define CYD_LED_BLUE 17
+#endif
+#ifndef TFT_BL
+#define TFT_BL 21
+#endif
 
-// ── Web Server（監聽 80 port）──────────────────────────────
-WebServer server(80);      // 建立 HTTP 伺服器，Port 80（標準 HTTP）
+// ==========================================
+// 2. 物理常數與資料結構
+// ==========================================
+#define SCREEN_W 320
+#define SCREEN_H 240
+#define NUM_BALLS 4
+#define COLOR_BG 0x0821        // 深黑藍背景
 
-// ── 感測器數值儲存 ──────────────────────────────────────────
-float temperature = 0.0;   // 溫度（°C）
-float humidity    = 0.0;   // 濕度（%）
-unsigned long lastRead = 0; // 上次讀取感測器的時間戳
+#define BOUNCE_RESTITUTION 1.0f  // 彈性係數 (1.0 = 完全彈性碰撞，永不衰減)
+#define MAX_VELOCITY 7.5f        // 最大飛行速度限制
+#define MIN_VELOCITY 1.2f        // 最小飛行速度限制 (保持活躍飛行)
 
-// ── Dashboard HTML 頁面 ────────────────────────────────────
-// 使用 R"rawstring(...)rawstring" 原始字串，避免引號跳脫問題
-// JavaScript 每 3 秒向 /data 取得最新 JSON，更新畫面數值
-const char HTML_PAGE[] PROGMEM = R"rawhtml(
-<!DOCTYPE html>
-<html lang="zh-TW">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ESP32-S3 環境監測</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      font-family: 'Segoe UI', Arial, sans-serif;
-      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, rgb(15, 52, 96) 100%);
-      min-height: 100vh;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      color: #fff;
+struct Ball {
+  float x, y;          // 當前位置 (子像素精度)
+  float vx, vy;        // 速度向量 (像素/幀)
+  float last_x, last_y;// 上一幀位置 (用於局部微抹除)
+  float radius;        // 球體半徑
+  float mass;          // 質量 (與半徑平方成正比)
+  uint16_t color;      // 主要主色調
+  uint16_t light_color;// 高光色
+  uint16_t dark_color; // 陰影色
+  uint8_t r_byte, g_byte, b_byte; // RGB 原色 (用於 LED 反饋)
+  bool is_dragged;     // 是否正被手指拖曳
+  float drag_off_x, drag_off_y; // 拖曳偏移量
+};
+
+// 碰撞衝擊波紋效果結構
+struct Ripple {
+  float x, y;
+  float current_r;
+  float max_r;
+  uint16_t color;
+  bool active;
+};
+
+#define MAX_RIPPLES 4
+static Ripple ripples[MAX_RIPPLES];
+
+static Ball balls[NUM_BALLS];
+static int dragged_ball_idx = -1;
+static unsigned long led_off_time = 0;
+static uint32_t total_bounces = 0;
+
+// 效能與 FPS 統計
+static uint32_t frame_count = 0;
+static float current_fps = 60.0f;
+static unsigned long fps_timer = 0;
+
+// ==========================================
+// 3. 色彩工具與 LED 控制
+// ==========================================
+void triggerCollisionLED(uint8_t r, uint8_t g, uint8_t b) {
+  // CYD 板載 RGB LED (Active LOW)
+  analogWrite(CYD_LED_RED,   255 - r);
+  analogWrite(CYD_LED_GREEN, 255 - g);
+  analogWrite(CYD_LED_BLUE,  255 - b);
+  led_off_time = millis() + 45; // 點亮 45ms
+}
+
+void updateLEDState() {
+  if (led_off_time > 0 && millis() >= led_off_time) {
+    digitalWrite(CYD_LED_RED, HIGH);
+    digitalWrite(CYD_LED_GREEN, HIGH);
+    digitalWrite(CYD_LED_BLUE, HIGH);
+    led_off_time = 0;
+  }
+}
+
+// 產生新的波紋
+void spawnRipple(float x, float y, float r, uint16_t color) {
+  for (int i = 0; i < MAX_RIPPLES; i++) {
+    if (!ripples[i].active) {
+      ripples[i].x = x;
+      ripples[i].y = y;
+      ripples[i].current_r = r * 0.7f;
+      ripples[i].max_r = r * 1.6f;
+      ripples[i].color = color;
+      ripples[i].active = true;
+      break;
     }
-    h1 {
-      font-size: 1.6rem;
-      letter-spacing: 2px;
-      margin-bottom: 8px;
-      color: #e0e0e0;
-    }
-    .subtitle {
-      font-size: 0.85rem;
-      color: #7f8c8d;
-      margin-bottom: 40px;
-      letter-spacing: 1px;
-    }
-    .cards {
-      display: flex;
-      gap: 30px;
-      flex-wrap: wrap;
-      justify-content: center;
-    }
-    .card {
-      background: rgba(255,255,255,0.07);
-      border: 1px solid rgba(255,255,255,0.12);
-      border-radius: 20px;
-      padding: 40px 50px;
-      text-align: center;
-      backdrop-filter: blur(10px);
-      box-shadow: 0 8px 32px rgba(0,0,0,0.3);
-      transition: transform 0.2s;
-      min-width: 200px;
-    }
-    .card:hover { transform: translateY(-4px); }
-    .card-icon { font-size: 3rem; margin-bottom: 12px; }
-    .card-label {
-      font-size: 0.9rem;
-      color: #95a5a6;
-      letter-spacing: 2px;
-      text-transform: uppercase;
-      margin-bottom: 10px;
-    }
-    .card-value {
-      font-size: 3.5rem;
-      font-weight: 700;
-      line-height: 1;
-    }
-    .card-unit {
-      font-size: 1.4rem;
-      font-weight: 300;
-      color: #bdc3c7;
-    }
-    .temp .card-value { color: #ff6b6b; }
-    .humi .card-value { color: #48dbfb; }
-    .status-bar {
-      margin-top: 40px;
-      font-size: 0.8rem;
-      color: #636e72;
-      letter-spacing: 1px;
-    }
-    .dot {
-      display: inline-block;
-      width: 8px; height: 8px;
-      border-radius: 50%;
-      background: #00b894;
-      margin-right: 6px;
-      animation: pulse 1.5s infinite;
-    }
-    @keyframes pulse {
-      0%,100% { opacity: 1; }
-      50%      { opacity: 0.3; }
-    }
-  </style>
-</head>
-<body>
-  <h1>🌡️ 環境監測 Dashboard</h1>
-  <div class="subtitle">ESP32-S3 ・ DHT-11 ・ GPIO 15</div>
+  }
+}
 
-  <div class="cards">
-    <div class="card temp">
-      <div class="card-icon">🌡️</div>
-      <div class="card-label">溫度</div>
-      <div class="card-value"><span id="temp">--</span><span class="card-unit"> °C</span></div>
-    </div>
-    <div class="card humi">
-      <div class="card-icon">💧</div>
-      <div class="card-label">濕度</div>
-      <div class="card-value"><span id="humi">--</span><span class="card-unit"> %</span></div>
-    </div>
-  </div>
+// ==========================================
+// 4. 2D 物理碰撞引擎 (Physics Engine)
+// ==========================================
 
-  <div class="status-bar">
-    <span class="dot"></span>
-    每 3 秒自動更新 ・ 上次更新：<span id="ts">--</span>
-  </div>
+// 檢查並處理牆面邊界碰撞
+void resolveWallCollision(Ball &b) {
+  // 左右兩側牆面
+  if (b.x - b.radius < 0.0f) {
+    b.x = b.radius;
+    b.vx = -b.vx * BOUNCE_RESTITUTION;
+    spawnRipple(b.x, b.y, b.radius, b.color);
+    triggerCollisionLED(b.r_byte, b.g_byte, b.b_byte);
+    total_bounces++;
+  } else if (b.x + b.radius >= (float)SCREEN_W) {
+    b.x = (float)SCREEN_W - b.radius - 0.1f;
+    b.vx = -b.vx * BOUNCE_RESTITUTION;
+    spawnRipple(b.x, b.y, b.radius, b.color);
+    triggerCollisionLED(b.r_byte, b.g_byte, b.b_byte);
+    total_bounces++;
+  }
 
-  <style>
-    .chart-wrap {
-      margin-top: 36px;
-      background: rgba(255,255,255,0.05);
-      border: 1px solid rgba(255,255,255,0.1);
-      border-radius: 16px;
-      padding: 20px 20px 12px;
-      width: 90%;
-      max-width: 680px;
-    }
-    .chart-title { font-size:0.9rem; color:#b2bec3; letter-spacing:1px; margin-bottom:8px; }
-    .chart-legend { font-size:0.78rem; margin-bottom:10px; }
-    .leg-t { color:#ff6b6b; margin-right:16px; }
-    .leg-h { color:#48dbfb; }
-    #chart { width:100%; display:block; }
-  </style>
+  // 上下兩側牆面 (避開頂部 20px HUD 資訊列)
+  float top_bound = 22.0f;
+  if (b.y - b.radius < top_bound) {
+    b.y = top_bound + b.radius;
+    b.vy = -b.vy * BOUNCE_RESTITUTION;
+    spawnRipple(b.x, b.y, b.radius, b.color);
+    triggerCollisionLED(b.r_byte, b.g_byte, b.b_byte);
+    total_bounces++;
+  } else if (b.y + b.radius >= (float)SCREEN_H) {
+    b.y = (float)SCREEN_H - b.radius - 0.1f;
+    b.vy = -b.vy * BOUNCE_RESTITUTION;
+    spawnRipple(b.x, b.y, b.radius, b.color);
+    triggerCollisionLED(b.r_byte, b.g_byte, b.b_byte);
+    total_bounces++;
+  }
+}
 
-  <div class="chart-wrap">
-    <div class="chart-title">📈 歷史趨勢（最近 30 筆，每 3 秒更新）</div>
-    <div class="chart-legend">
-      <span class="leg-t">▬ 溫度 (°C)｜左軸 0–50</span>
-      <span class="leg-h">▬ 濕度 (%)｜右軸 0–100</span>
-    </div>
-    <canvas id="chart" width="640" height="180"></canvas>
-  </div>
+// 檢查並處理球體間完全彈性碰撞 (Ball-to-Ball Elastic Collision)
+void resolveBallCollision(Ball &b1, Ball &b2) {
+  float dx = b2.x - b1.x;
+  float dy = b2.y - b1.y;
+  float dist_sq = dx * dx + dy * dy;
+  float min_dist = b1.radius + b2.radius;
 
-  <script>
-    const MAX_PTS = 30;
-    let tArr=[], hArr=[], lArr=[];
+  // 1. 碰撞檢測 (距離小於兩半徑之和)
+  if (dist_sq < min_dist * min_dist && dist_sq > 0.0001f) {
+    float dist = sqrtf(dist_sq);
 
-    function drawChart() {
-      const cv = document.getElementById('chart');
-      const ctx = cv.getContext('2d');
-      const W=cv.width, H=cv.height;
-      const P={t:18,r:48,b:28,l:42};
-      const cW=W-P.l-P.r, cH=H-P.t-P.b;
+    // 碰撞法線單位向量
+    float nx = dx / dist;
+    float ny = dy / dist;
 
-      ctx.clearRect(0,0,W,H);
+    // 相對速度向量
+    float dvx = b1.vx - b2.vx;
+    float dvy = b1.vy - b2.vy;
 
-      // 圖表背景
-      ctx.fillStyle='rgba(255,255,255,0.03)';
-      ctx.fillRect(P.l,P.t,cW,cH);
+    // 法線方向投影速度
+    float vel_along_normal = dvx * nx + dvy * ny;
 
-      // 格線 + 左右 Y 軸刻度
-      for(let i=0;i<=5;i++){
-        const y=P.t+(cH/5)*i;
-        ctx.strokeStyle='rgba(255,255,255,0.08)';
-        ctx.lineWidth=1;
-        ctx.beginPath(); ctx.moveTo(P.l,y); ctx.lineTo(P.l+cW,y); ctx.stroke();
-        ctx.font='10px Arial';
-        ctx.fillStyle='#ff9f9f'; ctx.textAlign='right';
-        ctx.fillText((50-i*10)+'°', P.l-4, y+4);       // 溫度軸（左）
-        ctx.fillStyle='#7fe8ff'; ctx.textAlign='left';
-        ctx.fillText((100-i*20)+'%', P.l+cW+4, y+4);   // 濕度軸（右）
+    // 若速度方向正在分離，不處理
+    if (vel_along_normal > 0.0f) {
+      // 2. 位置分離校正 (Positional Correction 防止卡球/黏球 Bug)
+      float overlap = min_dist - dist;
+      float percent = 0.55f; // 分離係數
+      float total_mass = b1.mass + b2.mass;
+
+      if (!b1.is_dragged && !b2.is_dragged) {
+        b1.x -= nx * overlap * (b2.mass / total_mass) * percent;
+        b1.y -= ny * overlap * (b2.mass / total_mass) * percent;
+        b2.x += nx * overlap * (b1.mass / total_mass) * percent;
+        b2.y += ny * overlap * (b1.mass / total_mass) * percent;
+      } else if (b1.is_dragged && !b2.is_dragged) {
+        b2.x += nx * overlap;
+        b2.y += ny * overlap;
+      } else if (!b1.is_dragged && b2.is_dragged) {
+        b1.x -= nx * overlap;
+        b1.y -= ny * overlap;
       }
 
-      if(tArr.length < 2) return;
-      const n = tArr.length;
+      // 3. 2D 動量守恆與衝量計算 (Impulse Formula)
+      float impulse = (-(1.0f + BOUNCE_RESTITUTION) * vel_along_normal) / ((1.0f / b1.mass) + (1.0f / b2.mass));
 
-      // 畫折線函式
-      function line(arr, maxV, color){
-        ctx.strokeStyle=color; ctx.lineWidth=2;
-        ctx.shadowColor=color; ctx.shadowBlur=6;
-        ctx.beginPath();
-        arr.forEach((v,i)=>{
-          const x = P.l + (i/(MAX_PTS-1))*cW*0.9;  // 右邊保留 10% 空間
-          const y = P.t + cH - (Math.min(Math.max(v,0),maxV)/maxV)*cH;
-          i===0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y);
-        });
-        ctx.stroke();
-        ctx.shadowBlur=0;
-        // 最新值的圓點與數值標籤
-        const li=arr.length-1;
-        const lx=P.l+(li/(MAX_PTS-1))*cW*0.9;  // 右邊保留 10% 空間
-        const ly=P.t+cH-(Math.min(Math.max(arr[li],0),maxV)/maxV)*cH;
-        ctx.fillStyle=color;
-        ctx.beginPath(); ctx.arc(lx,ly,4,0,Math.PI*2); ctx.fill();
-        ctx.font='bold 11px Arial'; ctx.textAlign='center';
-        ctx.fillText(arr[li].toFixed(1), lx, ly-10);
+      if (!b1.is_dragged) {
+        b1.vx += (impulse / b1.mass) * nx;
+        b1.vy += (impulse / b1.mass) * ny;
+      }
+      if (!b2.is_dragged) {
+        b2.vx -= (impulse / b2.mass) * nx;
+        b2.vy -= (impulse / b2.mass) * ny;
       }
 
-      line(tArr, 50,  '#ff6b6b');   // 溫度（最大 50°C）
-      line(hArr, 100, '#48dbfb');   // 濕度（最大 100%）
+      // 限制速度上下限避免靜止或暴走
+      float speed1 = sqrtf(b1.vx * b1.vx + b1.vy * b1.vy);
+      if (speed1 > MAX_VELOCITY) { b1.vx = (b1.vx / speed1) * MAX_VELOCITY; b1.vy = (b1.vy / speed1) * MAX_VELOCITY; }
+      else if (speed1 < MIN_VELOCITY) { b1.vx = (b1.vx / speed1) * MIN_VELOCITY; b1.vy = (b1.vy / speed1) * MIN_VELOCITY; }
 
-      // X 軸時間標籤（首、中、末）
-      ctx.fillStyle='#636e72'; ctx.font='10px Arial'; ctx.textAlign='center';
-      ctx.fillText(lArr[0],               P.l,                              H-4);
-      ctx.fillText(lArr[Math.floor(n/2)], P.l+(Math.floor(n/2)/(MAX_PTS-1))*cW*0.9, H-4);
-      ctx.fillText(lArr[n-1],             P.l+((n-1)/(MAX_PTS-1))*cW*0.9,           H-4);
+      float speed2 = sqrtf(b2.vx * b2.vx + b2.vy * b2.vy);
+      if (speed2 > MAX_VELOCITY) { b2.vx = (b2.vx / speed2) * MAX_VELOCITY; b2.vy = (b2.vy / speed2) * MAX_VELOCITY; }
+      else if (speed2 < MIN_VELOCITY) { b2.vx = (b2.vx / speed2) * MIN_VELOCITY; b2.vy = (b2.vy / speed2) * MIN_VELOCITY; }
+
+      // 碰撞中心點生成光暈與硬體 LED 閃爍
+      float contact_x = b1.x + nx * b1.radius;
+      float contact_y = b1.y + ny * b1.radius;
+      spawnRipple(contact_x, contact_y, (b1.radius + b2.radius) * 0.5f, TFT_WHITE);
+
+      triggerCollisionLED((b1.r_byte + b2.r_byte) / 2, (b1.g_byte + b2.g_byte) / 2, (b1.b_byte + b2.b_byte) / 2);
+      total_bounces++;
     }
+  }
+}
 
-    function update() {
-      fetch('/data')
-        .then(r => r.json())
-        .then(d => {
-          const t=parseFloat(d.temperature), h=parseFloat(d.humidity);
-          document.getElementById('temp').textContent = isNaN(t)?'--':t.toFixed(1);
-          document.getElementById('humi').textContent = isNaN(h)?'--':h.toFixed(1);
-          const ts = new Date().toLocaleTimeString();
-          document.getElementById('ts').textContent = ts;
-          if(!isNaN(t) && !isNaN(h)){
-            if(tArr.length>=MAX_PTS){ tArr.shift(); hArr.shift(); lArr.shift(); }
-            tArr.push(t); hArr.push(h); lArr.push(ts);
-            drawChart();
+// 物理單步更新
+void updatePhysics() {
+  for (int i = 0; i < NUM_BALLS; i++) {
+    Ball &b = balls[i];
+    if (!b.is_dragged) {
+      b.x += b.vx;
+      b.y += b.vy;
+      resolveWallCollision(b);
+    }
+  }
+
+  // 兩兩球體碰撞檢查 (4 顆球共 6 組比對)
+  for (int i = 0; i < NUM_BALLS - 1; i++) {
+    for (int j = i + 1; j < NUM_BALLS; j++) {
+      resolveBallCollision(balls[i], balls[j]);
+    }
+  }
+}
+
+// ==========================================
+// 5. 高效無閃爍繪製 (Flicker-Free Graphics)
+// ==========================================
+
+// 抹除舊位置 (上一幀)
+void eraseBall(const Ball &b) {
+  // 抹除上一幀球體以及波紋範圍 (+3px 安全邊界)
+  tft.fillCircle((int)b.last_x, (int)b.last_y, (int)b.radius + 3, COLOR_BG);
+}
+
+// 繪製立體光澤球體 (3D Shaded Sphere)
+void drawShadedBall(const Ball &b) {
+  int ix = (int)b.x;
+  int iy = (int)b.y;
+  int ir = (int)b.radius;
+
+  // 1. 底層暗面色圈
+  tft.fillCircle(ix, iy, ir, b.dark_color);
+
+  // 2. 主色調球體
+  tft.fillCircle(ix, iy, ir - 2, b.color);
+
+  // 3. 偏心光源過渡亮圈
+  int light_ox = ix - ir / 4;
+  int light_oy = iy - ir / 4;
+  tft.fillCircle(light_ox, light_oy, ir / 2, b.light_color);
+
+  // 4. 白色鏡面高光小亮點 (Specular Highlight)
+  int spec_ox = ix - ir / 3;
+  int spec_oy = iy - ir / 3;
+  tft.fillCircle(spec_ox, spec_oy, max(2, ir / 6), TFT_WHITE);
+}
+
+// 繪製與更新衝擊波紋
+void updateAndDrawRipples() {
+  for (int i = 0; i < MAX_RIPPLES; i++) {
+    if (ripples[i].active) {
+      // 抹除舊圈
+      tft.drawCircle((int)ripples[i].x, (int)ripples[i].y, (int)ripples[i].current_r, COLOR_BG);
+
+      ripples[i].current_r += 2.0f;
+      if (ripples[i].current_r >= ripples[i].max_r) {
+        ripples[i].active = false;
+      } else {
+        tft.drawCircle((int)ripples[i].x, (int)ripples[i].y, (int)ripples[i].current_r, ripples[i].color);
+      }
+    }
+  }
+}
+
+// 頂部 HUD 資訊面板
+void drawHUD() {
+  tft.fillRect(0, 0, 320, 20, 0x0000);
+  tft.drawFastHLine(0, 20, 320, 0x2126);
+
+  tft.setTextColor(0x07FF, 0x0000);
+  tft.setTextSize(1);
+  tft.drawString("2D ELASTIC RGB BALLS", 8, 6);
+
+  char buf[48];
+  snprintf(buf, sizeof(buf), "FPS: %.0f | Bounces: %lu", current_fps, (unsigned long)total_bounces);
+  tft.drawString(buf, 175, 6);
+}
+
+// ==========================================
+// 6. 觸控輸入處理 (Touch Interaction)
+// ==========================================
+void handleTouch() {
+  static float touch_last_x = 0;
+  static float touch_last_y = 0;
+
+  if (ts.touched()) {
+    TS_Point p = ts.getPoint();
+
+    // 螢幕校正映射 (CYD 320x240 橫向)
+    int tx = map(p.x, 240, 3800, 0, 320);
+    int ty = map(p.y, 240, 3800, 0, 240);
+    tx = constrain(tx, 0, 319);
+    ty = constrain(ty, 22, 239);
+
+    if (dragged_ball_idx < 0) {
+      // 檢測是否點中某顆球
+      for (int i = 0; i < NUM_BALLS; i++) {
+        float dx = tx - balls[i].x;
+        float dy = ty - balls[i].y;
+        if (dx * dx + dy * dy <= (balls[i].radius + 8.0f) * (balls[i].radius + 8.0f)) {
+          dragged_ball_idx = i;
+          balls[i].is_dragged = true;
+          balls[i].drag_off_x = balls[i].x - tx;
+          balls[i].drag_off_y = balls[i].y - ty;
+          balls[i].vx = 0;
+          balls[i].vy = 0;
+          break;
+        }
+      }
+
+      // 若未點中任何球：在手指位置產生衝擊波將球推開 (Force Push)
+      if (dragged_ball_idx < 0) {
+        spawnRipple(tx, ty, 30.0f, 0x07FF);
+        for (int i = 0; i < NUM_BALLS; i++) {
+          float pdx = balls[i].x - tx;
+          float pdy = balls[i].y - ty;
+          float pdist = sqrtf(pdx * pdx + pdy * pdy);
+          if (pdist > 1.0f && pdist < 120.0f) {
+            float push_factor = (120.0f - pdist) / 120.0f * 4.5f;
+            balls[i].vx += (pdx / pdist) * push_factor;
+            balls[i].vy += (pdy / pdist) * push_factor;
           }
-        })
-        .catch(()=>{
-          document.getElementById('temp').textContent='--';
-          document.getElementById('humi').textContent='--';
-        });
-    }
-    update();
-    setInterval(update, 3000);
-  </script>
-</body>
-</html>
-)rawhtml";
-
-// ── 路由：/ → 回傳 Dashboard HTML ──────────────────────────
-void handleRoot() {
-  server.send(200, "text/html", HTML_PAGE); // 回傳 HTTP 200，Content-Type: text/html
-}
-
-// ── 路由：/data → 回傳 JSON 格式的溫濕度數值 ──────────────
-void handleData() {
-  // 組合 JSON 字串（格式：{"temperature":25.5,"humidity":60.2}）
-  String json = "{";
-  json += "\"temperature\":" + String(temperature, 1) + ","; // 溫度，保留 1 位小數
-  json += "\"humidity\":"    + String(humidity,    1);       // 濕度，保留 1 位小數
-  json += "}";
-  server.send(200, "application/json", json); // 回傳 HTTP 200，Content-Type: JSON
-}
-
-// ── 路由：404 頁面 ──────────────────────────────────────────
-void handleNotFound() {
-  server.send(404, "text/plain", "404 Not Found"); // 找不到路由時回傳 404
-}
-
-// ============================================================
-// setup() — 開機初始化
-// ============================================================
-void setup() {
-  Serial.begin(115200);              // 啟動序列埠（鮑率 115200）
-  Serial.println("\n=== ESP32-S3 DHT11 Dashboard 啟動中 ===");
-
-  // ── 初始化 DHT11 感測器 ──────────────────────────────────
-  dht.begin();                       // 啟動 DHT 感測器驅動
-  Serial.println("[DHT] DHT11 初始化完成，接腳：GPIO 15");
-
-  // ── 連接 Wi-Fi ───────────────────────────────────────────
-  Serial.printf("[WiFi] 嘗試連接：%s\n", SSID);
-  Serial.println("[WiFi] 注意：ESP32 只支援 2.4GHz，不支援 5GHz！");
-  WiFi.mode(WIFI_STA);               // 設定為 Station 模式（連接路由器）
-  WiFi.begin(SSID, PASSWORD);        // 開始連接 Wi-Fi
-
-  int retries = 0;                   // 重試計數
-  while (WiFi.status() != WL_CONNECTED) { // 等待連線成功
-    delay(500);                      // 每 500ms 檢查一次
-    Serial.print(".");
-    retries++;
-    if (retries > 20) {              // 超過 10 秒仍未連線 → 切換 AP 模式
-      Serial.println("\n[WiFi] 連線失敗！切換為 AP 熱點模式...");
-      WiFi.mode(WIFI_AP);            // 切換為 AP（Access Point）模式
-      WiFi.softAP(AP_SSID, AP_PASS); // 建立 ESP32 熱點
-      Serial.println("=========================================");
-      Serial.printf("[AP] 熱點名稱：%s\n", AP_SSID);
-      Serial.printf("[AP] 熱點密碼：%s\n", AP_PASS);
-      Serial.printf("[AP] 連上熱點後，開啟瀏覽器輸入：http://192.168.4.1\n");
-      Serial.println("=========================================");
-      break;                         // 跳出等待迴圈
-    }
-  }
-
-  if (WiFi.status() == WL_CONNECTED) { // STA 模式連線成功
-    Serial.println();
-    Serial.println("=========================================");
-    Serial.printf("[WiFi] 連線成功！\n");
-    Serial.printf("[WiFi] 請用瀏覽器開啟：http://%s\n",
-      WiFi.localIP().toString().c_str());
-    Serial.println("=========================================");
-  }
-
-  // ── 設定 Web Server 路由 ─────────────────────────────────
-  server.on("/",      handleRoot);    // 根路由 → Dashboard HTML
-  server.on("/data",  handleData);    // /data  → JSON 溫濕度數值
-  server.onNotFound(handleNotFound);  // 其他路由 → 404
-
-  server.begin();                    // 啟動 Web Server（開始監聽 Port 80）
-  Serial.println("[Server] Web Server 已啟動");
-  Serial.println("=== 請用瀏覽器開啟上方 IP 位址 ===\n");
-}
-
-// ============================================================
-// loop() — 主循環
-// ============================================================
-void loop() {
-  server.handleClient();             // 處理 HTTP 請求（必須在 loop 中持續呼叫）
-
-  // 每 2 秒讀取一次感測器（DHT11 最快取樣間隔約 1 秒）
-  if (millis() - lastRead >= 2000) {
-    lastRead = millis();             // 更新上次讀取時間
-
-    float t = dht.readTemperature(); // 讀取溫度（°C）
-    float h = dht.readHumidity();    // 讀取濕度（%）
-
-    if (isnan(t) || isnan(h)) {      // 若讀取失敗（回傳 NaN）則跳過
-      Serial.println("[DHT] 讀取失敗，請確認接線");
+        }
+      }
     } else {
-      temperature = t;               // 更新全域溫度變數
-      humidity    = h;               // 更新全域濕度變數
-      Serial.printf("[DHT] 溫度：%.1f °C  濕度：%.1f %%\n", temperature, humidity);
+      // 拖曳該球
+      Ball &b = balls[dragged_ball_idx];
+      b.x = tx + b.drag_off_x;
+      b.y = ty + b.drag_off_y;
+
+      // 邊界防禦
+      b.x = constrain(b.x, b.radius, (float)SCREEN_W - b.radius);
+      b.y = constrain(b.y, 22.0f + b.radius, (float)SCREEN_H - b.radius);
+
+      // 計算手勢甩出力道
+      b.vx = (tx - touch_last_x) * 0.8f;
+      b.vy = (ty - touch_last_y) * 0.8f;
+    }
+
+    touch_last_x = tx;
+    touch_last_y = ty;
+  } else {
+    // 釋放拖曳
+    if (dragged_ball_idx >= 0) {
+      balls[dragged_ball_idx].is_dragged = false;
+      // 賦予最小速度避免靜止
+      float spd = sqrtf(balls[dragged_ball_idx].vx * balls[dragged_ball_idx].vx + 
+                        balls[dragged_ball_idx].vy * balls[dragged_ball_idx].vy);
+      if (spd < MIN_VELOCITY) {
+        balls[dragged_ball_idx].vx = random(-30, 30) * 0.1f;
+        balls[dragged_ball_idx].vy = random(-30, 30) * 0.1f;
+      }
+      dragged_ball_idx = -1;
     }
   }
+}
+
+// ==========================================
+// 7. 系統初始化 (setup)
+// ==========================================
+void setup() {
+  Serial.begin(115200);
+  delay(300);
+  Serial.println("\n============================================");
+  Serial.println("   ESP32 CYD - 4 Flying RGB Elastic Balls   ");
+  Serial.println("============================================");
+
+  // 初始化板載 RGB LED
+  pinMode(CYD_LED_RED, OUTPUT);
+  pinMode(CYD_LED_GREEN, OUTPUT);
+  pinMode(CYD_LED_BLUE, OUTPUT);
+  digitalWrite(CYD_LED_RED, HIGH);
+  digitalWrite(CYD_LED_GREEN, HIGH);
+  digitalWrite(CYD_LED_BLUE, HIGH);
+
+  // 開啟螢幕背光
+  pinMode(TFT_BL, OUTPUT);
+  digitalWrite(TFT_BL, HIGH);
+
+  // 初始化 TFT 顯示器
+  tft.init();
+  tft.setRotation(1);
+  tft.fillScreen(COLOR_BG);
+
+  // 初始化 XPT2046 觸控螢幕
+  touchSPI.begin(XPT2046_CLK, XPT2046_MISO, XPT2046_MOSI, XPT2046_CS);
+  ts.begin(touchSPI);
+  ts.setRotation(1);
+
+  // 清空波紋
+  for (int i = 0; i < MAX_RIPPLES; i++) ripples[i].active = false;
+
+  // 初始化 4 顆不同半徑、質量、外觀的隨機霓虹 RGB 球體
+  // 球 0: 霓虹青藍 (Cyan)
+  balls[0].radius = 18.0f;
+  balls[0].x = 70.0f; balls[0].y = 80.0f;
+  balls[0].vx = 3.6f; balls[0].vy = 2.4f;
+  balls[0].color = tft.color565(0, 240, 255);
+  balls[0].light_color = tft.color565(140, 255, 255);
+  balls[0].dark_color = tft.color565(0, 100, 140);
+  balls[0].r_byte = 0; balls[0].g_byte = 255; balls[0].b_byte = 255;
+
+  // 球 1: 霓虹洋紅/鮮紅 (Magenta / Pink-Red)
+  balls[1].radius = 24.0f;
+  balls[1].x = 240.0f; balls[1].y = 90.0f;
+  balls[1].vx = -3.2f; balls[1].vy = 2.8f;
+  balls[1].color = tft.color565(255, 30, 140);
+  balls[1].light_color = tft.color565(255, 140, 200);
+  balls[1].dark_color = tft.color565(140, 0, 60);
+  balls[1].r_byte = 255; balls[1].g_byte = 30; balls[1].b_byte = 140;
+
+  // 球 2: 霓虹亮綠 (Neon Lime Green)
+  balls[2].radius = 21.0f;
+  balls[2].x = 100.0f; balls[2].y = 180.0f;
+  balls[2].vx = 2.8f; balls[2].vy = -3.5f;
+  balls[2].color = tft.color565(50, 255, 60);
+  balls[2].light_color = tft.color565(170, 255, 170);
+  balls[2].dark_color = tft.color565(10, 120, 20);
+  balls[2].r_byte = 50; balls[2].g_byte = 255; balls[2].b_byte = 60;
+
+  // 球 3: 霓虹金橙 (Amber Gold / Yellow)
+  balls[3].radius = 27.0f;
+  balls[3].x = 220.0f; balls[3].y = 175.0f;
+  balls[3].vx = -2.5f; balls[3].vy = -2.6f;
+  balls[3].color = tft.color565(255, 190, 0);
+  balls[3].light_color = tft.color565(255, 235, 130);
+  balls[3].dark_color = tft.color565(150, 90, 0);
+  balls[3].r_byte = 255; balls[3].g_byte = 200; balls[3].b_byte = 0;
+
+  for (int i = 0; i < NUM_BALLS; i++) {
+    balls[i].last_x = balls[i].x;
+    balls[i].last_y = balls[i].y;
+    balls[i].mass = balls[i].radius * balls[i].radius; // 質量與體積/面積正比
+    balls[i].is_dragged = false;
+  }
+
+  drawHUD();
+  fps_timer = millis();
+  Serial.println("[SYSTEM] 4 Elastic RGB balls ready!");
+}
+
+// ==========================================
+// 8. 主運算迴圈 (60 FPS Game Loop)
+// ==========================================
+void loop() {
+  // 1. 處理觸控手勢
+  handleTouch();
+
+  // 2. 局部抹除 4 顆球上一幀位置
+  for (int i = 0; i < NUM_BALLS; i++) {
+    eraseBall(balls[i]);
+  }
+
+  // 3. 2D 物理碰撞模擬運算
+  updatePhysics();
+
+  // 4. 繪製衝擊波紋
+  updateAndDrawRipples();
+
+  // 5. 繪製 4 顆球體新位置 (按半徑由大至小繪製維持層次)
+  for (int i = 0; i < NUM_BALLS; i++) {
+    drawShadedBall(balls[i]);
+    // 保存當前位置作為下一幀抹除基準
+    balls[i].last_x = balls[i].x;
+    balls[i].last_y = balls[i].y;
+  }
+
+  // 6. 硬體 LED 與計時維護
+  updateLEDState();
+
+  // 7. FPS 效能計數與 HUD 更新 (每秒一次)
+  frame_count++;
+  unsigned long now = millis();
+  if (now - fps_timer >= 1000) {
+    current_fps = (float)frame_count * 1000.0f / (float)(now - fps_timer);
+    frame_count = 0;
+    fps_timer = now;
+    drawHUD();
+  }
+
+  // 控制幀率穩定在 ~60 FPS (每幀約 16ms)
+  delay(12);
 }
