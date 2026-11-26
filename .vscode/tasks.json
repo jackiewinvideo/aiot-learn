@@ -1,0 +1,17 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "ThingSpeak dashboard (Tailscale)",
+			"type": "shell",
+			"command": "python",
+			"args": [
+				"dashboard\\server.py",
+				"--host",
+				"100.70.12.126"
+			],
+			"isBackground": true,
+			"problemMatcher": []
+		}
+	]
+}

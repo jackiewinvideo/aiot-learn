@@ -1,0 +1,22 @@
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    env_file:
+      - .iot-postgres.env
+    environment:
+      POSTGRES_DB: iot_dashboard
+      POSTGRES_USER: postgres
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - iot_postgres_data:/var/lib/postgresql/data
+      - ./create_iot_schema.sql:/docker-entrypoint-initdb.d/10-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d iot_dashboard"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  iot_postgres_data:

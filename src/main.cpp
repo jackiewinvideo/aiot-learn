@@ -1,9 +1,9 @@
 #include <Arduino.h>
 
 void setup() {
-  Serial.begin(115200);
+  // 初始化程式碼
 }
 
 void loop() {
-  delay(1000);
+  // 迴圈程式碼
 }

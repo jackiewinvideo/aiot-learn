@@ -11,8 +11,9 @@
 #include <DHT.h>           // Adafruit DHT 感測器庫
 
 // ── Wi-Fi 設定 ─────────────────────────────────────────────
-const char* SSID     = "mcugust";   // Wi-Fi 名稱（SSID）
-const char* PASSWORD = "mcu18226";  // Wi-Fi 密碼
+const char* WIFI_SSID = "802.1x_MCU";
+const char* WIFI_USERNAME = "mcugust";
+const char* WIFI_PASSWORD = "mcu18226";
 
 // ── AP 備援模式設定（Wi-Fi 連不上時，ESP32 自己開熱點）─────
 const char* AP_SSID  = "ESP32-DHT11";  // ESP32 熱點名稱
@@ -296,10 +297,10 @@ void setup() {
   Serial.println("[DHT] DHT11 初始化完成，接腳：GPIO 15");
 
   // ── 連接 Wi-Fi ───────────────────────────────────────────
-  Serial.printf("[WiFi] 嘗試連接：%s\n", SSID);
+  Serial.printf("[WiFi] 嘗試連接：%s\n", WIFI_SSID);
   Serial.println("[WiFi] 注意：ESP32 只支援 2.4GHz，不支援 5GHz！");
   WiFi.mode(WIFI_STA);               // 設定為 Station 模式（連接路由器）
-  WiFi.begin(SSID, PASSWORD);        // 開始連接 Wi-Fi
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);        // 開始連接 Wi-Fi
 
   int retries = 0;                   // 重試計數
   while (WiFi.status() != WL_CONNECTED) { // 等待連線成功
